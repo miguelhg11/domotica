@@ -660,3 +660,176 @@ document.getElementById('sfTargetType').addEventListener('change',()=>buildTarge
 function buildActions(existing, mode){
   const w=document.getElementById('sfActionWrap'); w.innerHTML='';
   if((mode||document.getElementById('v-sched-form').dataset.mode)==='lights'){
+    w.innerHTML=`<button class="pill" data-t="LIGHT" data-v="1">Encender</button>
+                 <button class="pill" data-t="LIGHT" data-v="0">Apagar</button>`;
+  }else{
+    w.innerHTML=`<button class="pill" data-t="SHUTTER" data-d="UP">Abrir</button>
+                 <button class="pill" data-t="SHUTTER" data-d="DOWN">Cerrar</button>
+                 <button class="pill" data-t="SHUTTER" data-d="PERCENT">Porcentaje</button>`;
+  }
+  w.querySelectorAll('.pill').forEach(b=>b.onclick=()=>{w.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));b.classList.add('active');togglePct(b.dataset.d==='PERCENT')});
+  if(existing){
+    const sel=[...w.querySelectorAll('.pill')].find(b=> (existing.type==='LIGHT' && b.dataset.t==='LIGHT' && +b.dataset.v===existing.value) ||
+      (existing.type==='SHUTTER' && b.dataset.t==='SHUTTER' && b.dataset.d===existing.dir) );
+    if(sel) sel.click();
+    if(existing.type==='SHUTTER' && existing.dir==='PERCENT'){document.getElementById('sfPercent').value=existing.percent||50}
+  }else{ w.querySelector('.pill').click(); }
+}
+function togglePct(show){document.getElementById('sfPctWrap').classList.toggle('hidden', !show)}
+function buildDays(pre=[]){const w=document.getElementById('sfDays');w.innerHTML='';['L','M','X','J','V','S','D'].forEach((d,i)=>{const b=document.createElement('button');b.className='pill';b.textContent=d;b.dataset.i=i;if(pre.includes(i)) b.classList.add('active');b.onclick=()=>b.classList.toggle('active');w.appendChild(b)})}
+document.getElementById('sfTrigType').addEventListener('change',showTrig);
+function showTrig(){const t=document.getElementById('sfTrigType').value;document.getElementById('sfTrigTime').classList.toggle('hidden',t!=='time');document.getElementById('sfTrigSolar').classList.toggle('hidden',t!=='solar')}
+function pad2(n){return (n<10?'0':'')+n}
+
+async function saveSchedule(){
+  const mode=document.getElementById('v-sched-form').dataset.mode;
+  const name=document.getElementById('sfName').value.trim(); if(!name) return toast('Pon un nombre');
+  const targetType=document.getElementById('sfTargetType').value;
+  let ids=[]; if(targetType!=='ALL'){ids=[...document.querySelectorAll('#sfTargetWrap .pill.active')].map(b=>b.dataset.id); if(!ids.length) return toast('Selecciona destino')}
+  const aSel=document.querySelector('#sfActionWrap .pill.active'); if(!aSel) return toast('Elige acción');
+  let action=null;
+  if(aSel.dataset.t==='LIGHT'){action={type:'LIGHT',value:+aSel.dataset.v}}
+  else{ action={type:'SHUTTER',dir:aSel.dataset.d}; if(aSel.dataset.d==='PERCENT'){const pct=+document.getElementById('sfPercent').value; if(!(pct>=0&&pct<=100)) return toast('Porcentaje 0-100'); action.percent=pct} }
+  const trigType=document.getElementById('sfTrigType').value;
+  let trigger=null;
+  if(trigType==='time'){ trigger={type:'time',at:document.getElementById('sfTime').value||'08:00'} }
+  else{ trigger={type:'solar',event:document.getElementById('sfSolarEvent').value,sign:document.getElementById('sfSolarSign').value,h:+document.getElementById('sfSolarH').value,m:+document.getElementById('sfSolarM').value} }
+  const days=[...document.querySelectorAll('#sfDays .pill.active')].map(b=>+b.dataset.i); if(!days.length) return toast('Selecciona días');
+
+  const sched={ id: document.getElementById('v-sched-form').dataset.edit || String(Date.now()),
+    name, target:{type:targetType,ids}, action, trigger, days, enabled:true };
+
+  if(mode==='lights'){
+    const i=schedulesLights.findIndex(x=>x.id===sched.id);
+    if(i>=0) schedulesLights[i]=sched; else schedulesLights.push(sched);
+  }else{
+    const i=schedulesShutters.findIndex(x=>x.id===sched.id);
+    if(i>=0) schedulesShutters[i]=sched; else schedulesShutters.push(sched);
+  }
+  
+  // Guardar en la nube
+  log(`Schedule saved [${mode}] → ${sched.name}`);
+  const ok = await saveSchedulesToCloud();
+  if(ok) {
+    toast('Programación guardada en la nube');
+    go(mode==='lights'?'lights':'shutters');
+  } else {
+    toast('Error al guardar. Reintenta.');
+    // Opcional: revertir el cambio en el array local si falla
+  }
+}
+
+function cancelSchedule(){go(document.getElementById('v-sched-form').dataset.mode==='lights'?'lights':'shutters')}
+
+async function schedToggle(mode,id){
+  const arr=mode==='lights'?schedulesLights:schedulesShutters;
+  const s=arr.find(x=>x.id===id);
+  if(!s) return;
+  s.enabled=!s.enabled; // Cambia el estado localmente
+  log(`Schedule toggle [${mode}] ${id} → ${s.enabled?'ON':'OFF'}`);
+  
+  // Intenta guardar en la nube
+  const ok = await saveSchedulesToCloud();
+  if(ok) {
+    toast('Estado guardado en la nube');
+  } else {
+    s.enabled=!s.enabled; // Revertir el cambio si falla
+    toast('Error al guardar estado');
+    // Actualizar la UI para revertir el switch
+    const checkbox = document.querySelector(`[onchange="schedToggle('${mode}','${s.id}')"]`);
+    if (checkbox) checkbox.checked = s.enabled;
+  }
+}
+
+async function schedDel(mode,id){
+  if (!confirm('¿Seguro que quieres borrar esta programación?')) return;
+  
+  let arr=mode==='lights'?schedulesLights:schedulesShutters;
+  const originalArr = [...arr]; // Copia de seguridad
+  arr=arr.filter(x=>x.id!==id);
+  
+  if(mode==='lights'){ schedulesLights=arr; }else{ schedulesShutters=arr; }
+  log(`Schedule deleted [${mode}] ${id}. Guardando en nube...`);
+  
+  const ok = await saveSchedulesToCloud();
+  if (ok) {
+    toast('Programación borrada');
+    renderSchedLists(); // Actualiza la UI
+  } else {
+    toast('Error al borrar');
+    // Revertir
+    if(mode==='lights'){ schedulesLights=originalArr; }else{ schedulesShutters=originalArr; }
+  }
+}
+
+// =================================================================
+//          FIN DE LA MODIFICACIÓN (MOTOR LOCAL ELIMINADO)
+// =================================================================
+
+
+/*** === Exportar/Copiar logs === */
+async function exportLogs(){
+  try{
+    const text = (logs && logs.length) ? logs.join('\n') : '(sin registros)';
+    try{
+      await navigator.clipboard.writeText(text);
+      toast('Logs copiados al portapeles');
+      log('Logs copiados al portapeles');
+    }catch(e){
+      toast('No se pudo copiar, se descargan');
+    }
+    const blob=new Blob([text],{type:'text/plain'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download='domotica_logs.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    log('Logs exportados (descarga)');
+  }catch(err){
+    toast('Error al exportar logs');
+    log('Error exportando logs: '+(err&&err.message?err.message:err));
+  }
+}
+
+/*** === Click sonoro + feedback táctil === */
+let audioCtx=null;
+function playClick(){
+  try{
+    if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    const o=audioCtx.createOscillator();
+    const g=audioCtx.createGain();
+    o.type='square'; o.frequency.value=1000;
+    g.gain.setValueAtTime(0.08, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime+0.04);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime+0.04);
+  }catch(e){}
+}
+function pushFxOn(e){
+  const t=e.target.closest('.btn,.arc,.pill'); if(!t) return;
+  t.classList.add('pressed'); playClick();
+}
+function pushFxOff(e){
+  const t=e.target.closest('.btn,.arc,.pill'); if(!t) return;
+  t.classList.remove('pressed');
+}
+document.addEventListener('pointerdown',pushFxOn);
+document.addEventListener('pointerup',pushFxOff);
+document.addEventListener('pointercancel',pushFxOff);
+document.addEventListener('pointerleave',pushFxOff);
+
+/*** === Inicio === ***/
+// Los perfiles (IP) y calibraciones (tiempos) se siguen cargando localmente
+// Las programaciones (schedules) se cargarán desde la nube al entrar en la sección
+document.addEventListener('DOMContentLoaded',()=>{
+  renderBadge();
+  go('home');
+  // Cargar calibraciones locales al inicio
+  shutterCalibrations=JSON.parse(localStorage.getItem('domo_shutterCalibrations')||'{}');
+  log('App iniciada. Calibraciones locales cargadas.');
+});
+</script>
+</body>
+</html>
